@@ -24,6 +24,10 @@ DISCO = "homeassistant"
 
 DEVICE = {"identifiers": [NODE], "name": "TURZX Kiosk", "model": "Turing 8.8\"", "manufacturer": "TURZX"}
 
+# Entities that existed in older versions and must be removed from HA / the broker
+# (discovery configs are retained, so renamed entities leave stale duplicates behind).
+LEGACY = [("switch", "auto"), ("number", "interval"), ("button", "next"), ("button", "prev")]
+
 
 def _entities(app_names):
     base = {"availability_topic": AVAIL, "device": DEVICE}
@@ -83,6 +87,8 @@ def start_mqtt(state):
         client.publish(STATE, json.dumps(state.status()), retain=True)
 
     def on_connect(c, *_):
+        for comp, obj in LEGACY:          # remove stale renamed entities
+            c.publish(f"{DISCO}/{comp}/{NODE}/{obj}/config", "", retain=True)
         for comp, obj, conf in _entities(app_names):
             c.publish(f"{DISCO}/{comp}/{NODE}/{obj}/config", json.dumps(conf), retain=True)
         c.publish(AVAIL, "online", retain=True)
