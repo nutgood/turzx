@@ -65,6 +65,9 @@ def _entities(app_names):
         btn("alert_send", "Send alert", "mdi:bell-ring"),
         ("binary_sensor", "alert_active", cfg("alert_active", "Alert active", state_topic=STATE,
             value_template=sv("alert_active"), payload_on="ON", payload_off="OFF", device_class="problem")),
+        # Auto-discovered notify action -> notify.turzx_kiosk_alert (message-only, no YAML).
+        # For rich/multi-property alerts use script.kiosk_alert or publish JSON to cmd/alert.
+        ("notify", "alert", cfg("alert", "Alert", command_topic=f"{CMD}/alert", icon="mdi:bell-alert")),
     ]
 
 
@@ -132,8 +135,14 @@ def start_mqtt(state):
                 state._notify()
             elif sub == "alert_send":
                 state.fire_alert({"message": state.alert_msg or "ALERT", "timeout": state.alert_timeout})
-            elif sub == "alert":          # full JSON props for HA automations / the alert action
-                state.fire_alert(json.loads(payload))
+            elif sub == "alert":          # JSON props (automations) OR plain text (notify entity)
+                try:
+                    props = json.loads(payload)
+                    if not isinstance(props, dict):
+                        props = {"message": str(props)}
+                except (ValueError, TypeError):
+                    props = {"message": payload}
+                state.fire_alert(props)
         except Exception as e:
             print(f"mqtt cmd error ({sub}): {e}", flush=True)
 

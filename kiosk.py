@@ -11,6 +11,7 @@ Config via env:
   MQTT_HOST [MQTT_PORT MQTT_USER MQTT_PASS]   enable Home Assistant MQTT control
   KIOSK_PAGE_INTERVAL (default 7)  KIOSK_APP_INTERVAL (default 30)  KIOSK_BRIGHTNESS (default 70)
 """
+import json
 import os
 import socket
 import sys
@@ -35,6 +36,7 @@ from library.lcd.lcd_comm_turing_usb import LcdCommTuringUSB
 class App:
     name = "app"
     n_pages = 1
+    refresh = 2.0          # seconds between re-renders of the current page (per-app)
 
     def update(self):
         pass
@@ -46,6 +48,7 @@ class App:
 class RackApp(App):
     """The Grafana 'Rack Kiosk' dashboard — its 3 pages become this app's pages."""
     name = "Rack Kiosk"
+    refresh = 2.0          # re-query Prometheus + redraw every 2s
 
     def __init__(self):
         self.n_pages = len(RK.PAGES)
@@ -54,7 +57,7 @@ class RackApp(App):
 
     def update(self):
         now = time.time()
-        if now - self._last > 4.5:          # throttle Prometheus fetches
+        if now - self._last >= self.refresh - 0.2:   # fetch ~each render
             self.results = RK.fetch_all()
             self._last = now
 
@@ -65,6 +68,7 @@ class RackApp(App):
 class ClockApp(App):
     name = "Clock"
     n_pages = 1
+    refresh = 1.0          # tick every second
 
     def render(self, page):
         img = Image.new("RGB", (W, H), (6, 10, 24))
@@ -78,6 +82,7 @@ class ClockApp(App):
 class PiStatsApp(App):
     name = "Pi Stats"
     n_pages = 1
+    refresh = 2.0
 
     @staticmethod
     def _read():
@@ -141,7 +146,11 @@ class PiStatsApp(App):
 
 # ───────────────────────────── state ─────────────────────────────
 class State:
-    def __init__(self, apps, page_interval, app_interval, brightness):
+    # options set via MQTT/HA that persist across restarts (NOT transient alert state)
+    PERSIST = ("auto_page", "auto_app", "page_interval", "app_interval", "brightness",
+               "display_on", "app_idx", "page_idx", "alert_msg", "alert_timeout")
+
+    def __init__(self, apps, page_interval, app_interval, brightness, persist_path=None):
         self.apps = apps
         self.lock = threading.RLock()
         self.wake = threading.Event()
@@ -158,6 +167,40 @@ class State:
         self.alert_msg = ""              # buffer for HA text entity
         self.alert_timeout = 20          # buffer for HA number entity
         self.on_change = None            # set by MQTT to publish state
+        self.persist_path = persist_path
+        self._load()
+
+    # ---- persistence (only user/MQTT changes hit _notify, so auto-cycle never writes) ----
+    def _load(self):
+        if not self.persist_path or not os.path.exists(self.persist_path):
+            return
+        try:
+            d = json.load(open(self.persist_path))
+        except Exception as e:
+            print(f"state load failed: {e}", file=sys.stderr)
+            return
+        with self.lock:
+            for k in self.PERSIST:
+                if k in d:
+                    setattr(self, k, d[k])
+            self.app_idx %= len(self.apps)
+            self.page_idx %= self.apps[self.app_idx].n_pages
+            self.brightness = max(0, min(100, int(self.brightness)))
+            self.page_interval = max(2.0, float(self.page_interval))
+            self.app_interval = max(3.0, float(self.app_interval))
+
+    def _save(self):
+        if not self.persist_path:
+            return
+        try:
+            with self.lock:
+                d = {k: getattr(self, k) for k in self.PERSIST}
+            tmp = self.persist_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(d, f)
+            os.replace(tmp, self.persist_path)
+        except Exception as e:
+            print(f"state save failed: {e}", file=sys.stderr)
 
     def _notify(self):
         self.wake.set()
@@ -166,6 +209,7 @@ class State:
                 self.on_change()
             except Exception:
                 pass
+        self._save()
 
     # ---- app navigation ----
     def set_app(self, name_or_idx):
@@ -395,7 +439,8 @@ def main():
     app_interval = float(os.environ.get("KIOSK_APP_INTERVAL", "30"))
     brightness = int(os.environ.get("KIOSK_BRIGHTNESS", "70"))
     apps = [RackApp(), ClockApp(), PiStatsApp()]
-    state = State(apps, page_interval, app_interval, brightness)
+    state = State(apps, page_interval, app_interval, brightness,
+                  persist_path=os.path.join(HERE, "state.json"))
 
     if os.environ.get("MQTT_HOST"):
         try:
@@ -463,22 +508,24 @@ def main():
         if state.on_change:
             state.on_change()
 
-        deadlines = [d for d in (page_due, app_due) if d is not None]
-        timeout = max(0.0, min(deadlines) - time.time()) if deadlines else 3600
-        woken = state.wake.wait(timeout=timeout)
+        # wake at the soonest of: this app's re-render cadence, page cycle, app cycle
+        render_due = time.time() + max(0.2, getattr(app, "refresh", 2.0))
+        deadlines = [d for d in (page_due, app_due, render_due) if d is not None]
+        woken = state.wake.wait(timeout=max(0.0, min(deadlines) - time.time()))
         state.wake.clear()
         if woken:
             page_due = app_due = None       # control changed — re-arm from now, re-render
             continue
 
         now2 = time.time()
-        if app_due is not None and now2 >= app_due:     # app cycle fires (takes priority)
+        if app_due is not None and now2 >= app_due:      # app cycle fires (takes priority)
             state.adv_app()
             app_due = now2 + st["app_interval"]
             page_due = (now2 + st["page_interval"]) if st["auto_page"] else None
         elif page_due is not None and now2 >= page_due:  # page cycle fires (stays within app)
             state.adv_page()
             page_due = now2 + st["page_interval"]
+        # else: render_due fired — just re-render the same page (cycle timers keep counting)
 
 
 if __name__ == "__main__":

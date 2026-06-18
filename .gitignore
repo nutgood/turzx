@@ -24,3 +24,5 @@ log.log
 
 # local secrets / env
 kiosk.env
+state.json
+state.json.tmp
