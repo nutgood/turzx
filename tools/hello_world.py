@@ -10,7 +10,7 @@ import os
 import sys
 
 # Make the cloned library importable
-LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")  # repo-root/lib
 sys.path.insert(0, LIB)
 
 from PIL import Image, ImageDraw, ImageFont

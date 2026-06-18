@@ -8,9 +8,9 @@ Type=simple
 # Runs as root for direct libusb access to the vendor-specific USB display.
 User=root
 WorkingDirectory=/home/kiosk/turzx
-# Optional env (MQTT broker creds, dwell, brightness) — see kiosk.env.example
+# Optional env (MQTT broker creds, intervals, brightness) — see deploy/kiosk.env.example
 EnvironmentFile=-/home/kiosk/turzx/kiosk.env
-ExecStart=/home/kiosk/turzx/venv/bin/python /home/kiosk/turzx/kiosk.py
+ExecStart=/home/kiosk/turzx/venv/bin/python -m turzx
 Restart=always
 RestartSec=5
 

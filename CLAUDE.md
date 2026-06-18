@@ -2,7 +2,7 @@
 
 Driving a physical **Turing 8.8" smart screen**. Developed on this Mac (Apple Silicon);
 **deployed headless on a Raspberry Pi 5** (`ssh kiosk`, user `kiosk`) where it runs as the
-`rack-kiosk.service` systemd unit (runs `kiosk.py` as root for USB access). Repo is pushed to
+`turzx-kiosk.service` systemd unit (runs `python -m turzx` as root for USB access). Repo is pushed to
 `github.com/nutgood/turzx`. The Pi reaches Grafana/MQTT over Tailscale + LAN.
 **To build/extend apps, see the "Building a new app" guide in README.md.**
 
@@ -41,13 +41,22 @@ Driving a physical **Turing 8.8" smart screen**. Developed on this Mac (Apple Si
 - To recover a desynced/corrupted screen: **`recover.py`** does a `dev.reset()` (USB port reset clears the firmware's half-read buffer) + sync + Clear + clean frame. A physical replug also works (and re-enumerates).
 - After a replug the device briefly disappears; re-check presence before launching.
 
-## App framework / orchestrator (`kiosk.py`) — the production entrypoint
+## Package layout (`turzx/`) — the production entrypoint is `python -m turzx`
 
-`kiosk.py` is what the service runs. It owns the display and cycles **apps**, each with **pages**.
+The code is a package: `orchestrator.py` (loop), `state.py` (State + persistence),
+`render.py` (shared draw helpers), `grafana.py` (proxy client), `alert.py`, `mqtt.py`,
+`device.py` (USB open/presence), and `apps/` (one module per app + `__init__.default_apps()`).
+Standalone demos live in `tools/`. The vendored upstream driver is `lib/` (gitignored).
+
 - **App contract:** `name` (unique str, shown in HA App select), `n_pages` (int), `refresh`
   (float secs between re-renders of the current page), `update()` (optional data fetch),
-  `render(page) -> 1920×480 RGB PIL.Image`. Register by adding an instance to the `apps = [...]`
-  list in `main()`. Built-in: `RackApp` (wraps `rack_kiosk`), `ClockApp`, `PiStatsApp`.
+  `render(page) -> 1920×480 RGB PIL.Image`. Add a module under `turzx/apps/` and register in
+  `turzx/apps/__init__.py` → `default_apps()`. Built-in: `RackApp`, `ClockApp`, `PiStatsApp`.
+- **Render helpers live in `turzx/render.py`** (W/H, font, COL, th_color, fmt, draw_centered,
+  panel, blank) — apps import from there, NOT from another app. Grafana data: `turzx/grafana.py`.
+- **Display disconnect/reconnect is automatic:** the driver swallows USB write errors, so the
+  loop polls `device.present()` every 2s; on absence (or a `USBError`) it disposes the handle and
+  blocks in `_connect()` until the display is replugged, then re-opens. No service restart needed.
 - **Two independent cycles:** page-cycle (within app) and app-cycle, each its own on/off toggle
   + interval, driven by separate timers in the loop. Per-app `refresh` re-renders the current
   page on its own cadence (Clock 1s, dashboard 2s) — that's why the loop's wait deadline is
@@ -63,9 +72,9 @@ Driving a physical **Turing 8.8" smart screen**. Developed on this Mac (Apple Si
   icon/blink/size (`render_alert`). Nav (`next/prev app/page`, `set_app`) clears the alert
   instantly via `_clear_alert_locked()`.
 
-## Home Assistant / MQTT (`mqtt_control.py`)
+## Home Assistant / MQTT (`turzx/mqtt.py`)
 
-- Started by `kiosk.py` if `MQTT_HOST` is set (from `kiosk.env`, an EnvironmentFile in the unit).
+- Started by the orchestrator if `MQTT_HOST` is set (from `kiosk.env`, an EnvironmentFile in the unit).
 - Publishes retained HA **discovery** configs → auto-creates the "TURZX Kiosk" device. Entities
   are generated from `_entities(app_names)`; the App select options come from app names.
 - **Gotcha (cost a round):** discovery configs are **retained**. Renaming/removing an entity
@@ -79,34 +88,31 @@ Driving a physical **Turing 8.8" smart screen**. Developed on this Mac (Apple Si
 ## Deploy / RPi notes
 
 - `setup.sh` is cross-platform (Linux: apt installs `python3-venv libusb-1.0-0 fonts-dejavu-core git ffmpeg`, clones `lib/`, builds venv). Fonts: code finds macOS Helvetica → Linux DejaVu (don't hardcode macOS paths in new apps; use `rack_kiosk.font`).
-- Deploy = rsync (or git pull) + `sudo systemctl restart rack-kiosk`. Secrets (`.grafana_token`, `kiosk.env`) live only on the Pi (gitignored); `state.json` is per-host (gitignored).
+- Service is **`turzx-kiosk.service`** (ExecStart `python -m turzx`, WorkingDirectory `/home/kiosk/turzx`). Deploy = rsync (or git pull) + `sudo systemctl restart turzx-kiosk`. Secrets (`.grafana_token`, `kiosk.env`) live only on the Pi (gitignored); `state.json` is per-host (gitignored).
 - The old display driver on the Pi was **grafana-kiosk** (Chromium via `~/.xinitrc`/startx on tty1) — removed (autostart neutralized in `~/.bash_profile`, backups `.bak`).
 - macOS-Linux gotcha: `pkill -f <pattern>` matches your own SSH shell's argv — don't `pkill -f xinit` while a file named `.xinitrc` is in your command line.
 
-## Scripts
+## Production app & tools
 
-- `kiosk.py` — **production orchestrator** (apps + pages + MQTT + alerts + persistence). What the service runs.
-- `mqtt_control.py` — Home Assistant MQTT auto-discovery + command handling.
-- `hello_world.py` — minimal static "Hello World".
-- `show.py "TEXT" [landscape|reverse]` — static test frame with orientation markers.
-- `random_graphs.py [landscape|reverse]` — matplotlib assortment of random charts.
-- `animate.py [seconds|loop] ` — live oscilloscope (frame-by-frame PNG push, ~4.3 fps, graceful stop).
-- `recover.py` — USB reset + clean frame after corruption.
-- `make_video.py [out.mp4] [seconds]` — render a demo animation to a device-ready H.264 MP4.
-- `play_video.py [file.mp4] [loop]` — stream a pre-encoded MP4 via the native video path.
-- `stream_clock.py [seconds]` — LIVE on-the-fly H.264 stream of the current time incl. milliseconds (no arg = non-stop).
-- `rack_kiosk.py` / `run-kiosk.sh` — replica of the Grafana "Rack Kiosk" dashboard (see below).
+- **`python -m turzx`** — the production orchestrator (apps + pages + MQTT + alerts + persistence + reconnect). What `turzx-kiosk.service` runs.
+- `tools/render_app.py "<App>" [page] [out.png]` — render an app/page to PNG offline (no device).
+- `tools/hello_world.py`, `tools/show.py "TEXT" [landscape|reverse]` — static frames.
+- `tools/random_graphs.py [landscape|reverse]` — matplotlib charts.
+- `tools/animate.py [seconds|loop]` — live oscilloscope (frame-by-frame PNG push, ~4.3 fps, graceful stop).
+- `tools/recover.py` — USB reset + clean frame after corruption.
+- `tools/make_video.py [out.mp4] [seconds]` / `tools/play_video.py [file.mp4] [loop]` — H.264 video.
+- `tools/stream_clock.py [seconds]` — LIVE on-the-fly H.264 stream of the current time incl. milliseconds.
+- (tools run on macOS with `DYLD_LIBRARY_PATH=/opt/homebrew/lib`.)
 
-## Grafana "Rack Kiosk" dashboard replica (`rack_kiosk.py`)
+## Grafana "Rack Kiosk" dashboard app (`turzx/apps/rack.py`)
 
-Faithful on-device copy of the Grafana **Rack Kiosk** dashboard (uid `adg8v6n`), refreshing every 5s via the PNG path.
+Faithful on-device copy of the Grafana **Rack Kiosk** dashboard (uid `adg8v6n`) — the `RackApp`.
 - **Data access:** queries Prometheus through the **Grafana datasource proxy** — `GET {GRAFANA_URL}/api/datasources/proxy/uid/prometheus/api/v1/query` with `Authorization: Bearer <token>`. No need to expose Prometheus directly over Tailscale; the proxy covers all panels. (Grafana itself: `https://htalos-grafana.feist-boa.ts.net`, behind Tailscale; the API needs a token — `/api/health` is the only unauth endpoint.)
 - **Token:** read from `GRAFANA_TOKEN` env or the local `.grafana_token` file (chmod 600). It's a Grafana service-account token (`sa-1-claude`). Rotate in Grafana if leaked.
 - **Layout trick:** the Grafana grid is 24 cols × 28 row-units, which maps almost exactly onto 1920×480 (80px/col, ~17px/row-unit) — so the replica uses the dashboard's real `gridPos` and preserves the exact layout instead of re-flowing.
 - **Fidelity:** per-panel `unit` formatting (watt/percent/bps/celsius/seconds), `thresholds` → value colors (Grafana dark palette), value `mappings` (WAN UP/DOWN), and the two `bargauge` panels (rack temps, top outlets). Scalar-type PromQL results (e.g. `scalar()/scalar()`) need special handling — `data.result` is `[ts, val]`, not a series list.
-- **Paged:** auto-cycles 3 pages (Power & WAN / Temps & Outlets / Infra & Compute) with bigger tiles + a footer (page name, clock, page dots). `PANELS` is the data registry (by title); `PAGES` defines per-page layout on a 24-col×12-row grid. Args: `--secs=N` (seconds/page, default 7), `--page=N` (pin one page), `--save=FILE --once`/`--page=N` (render a PNG to inspect without the device — Read it directly for fast iteration).
-- **Run:** `./run-kiosk.sh [--secs=N]` (managed background task). The dashboard JSON is cached at `rackkiosk.json`; re-fetch with the token if panels change.
-- Source of homelab config: `../homelab-flux` (Flux GitOps, kube-prometheus-stack; dashboards live in Grafana's DB, not Git).
+- **Paged:** 3 pages (Power & WAN / Temps & Outlets / Infra & Compute) + a footer (page name, clock, page dots). `PANELS` is the data registry (by title); `PAGES` defines per-page layout on a 24-col×12-row grid. Inspect offline: `tools/render_app.py "Rack Kiosk" <page> out.png`.
+- Source of homelab config: `../homelab-flux` (Flux GitOps, kube-prometheus-stack; dashboards live in Grafana's DB, not Git). The dashboard JSON can be re-fetched from the Grafana API with the token.
 
 ## Video (H.264) — works, this is the path for smooth motion
 

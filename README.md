@@ -10,15 +10,25 @@ USB protocol (libusb bulk transfers, DES-encrypted command packets), driven via 
 `LcdCommTuringUSB` class from [mathoudebine/turing-smart-screen-python](https://github.com/mathoudebine/turing-smart-screen-python)
 (cloned into `lib/` by `setup.sh`).
 
-## What's here
+## Layout
 
-| Script | Purpose |
-|---|---|
-| `kiosk.py` | **Main entrypoint** — orchestrator that cycles through *apps* (Rack Kiosk dashboard, Clock, Pi Stats), with an instant alert overlay and optional Home Assistant MQTT control. |
-| `mqtt_control.py` | Home Assistant MQTT auto-discovery + command handling (used by `kiosk.py`). |
-| `rack_kiosk.py` | The Grafana "Rack Kiosk" dashboard replica (one of the apps; also runnable standalone). Queries Prometheus via the Grafana datasource proxy. |
-| `stream_clock.py` | Live, on-the-fly H.264 stream of the current time (incl. milliseconds). |
-| `hello_world.py`, `show.py`, `random_graphs.py`, `animate.py`, `make_video.py`, `play_video.py`, `brightness_sweep.py`, `recover.py` | Capability demos (static images, animation, native H.264 video playback, brightness, USB recovery). Some hardcode macOS font paths. |
+```
+turzx/              # the package — run with `python -m turzx`
+  orchestrator.py     main loop (cycles apps/pages, alert overlay, display on/off)
+  state.py            control state + persistence (state.json)
+  apps/               one module per app: rack.py, clock.py, pistats.py (+ base.py, __init__.py)
+  render.py           shared render helpers (fonts, colors, fmt, th_color, draw_centered, W/H)
+  grafana.py          Prometheus-via-Grafana-proxy client
+  alert.py            configurable alert overlay rendering
+  mqtt.py             Home Assistant MQTT auto-discovery + commands
+  device.py           opens the USB display (wraps vendored lib/)
+tools/              # standalone demos/utilities (not part of the kiosk)
+  render_app.py       render any app/page to a PNG (offline iteration)
+  hello_world.py show.py animate.py random_graphs.py make_video.py play_video.py
+  stream_clock.py brightness_sweep.py recover.py
+deploy/            # turzx-kiosk.service, ha-kiosk-alert.yaml, kiosk.env.example
+lib/               # vendored upstream driver (gitignored; cloned by setup.sh)
+```
 
 ### Display facts / gotchas
 - **Only the full-compression PNG path renders reliably** (`DisplayPILImage`, cmd 102). JPEG upload (cmd 101) and low-compression PNG are silently dropped → screen reverts to its idle wallpaper.
@@ -31,14 +41,14 @@ USB protocol (libusb bulk transfers, DES-encrypted command packets), driven via 
 ```bash
 ./setup.sh                       # apt deps + clone lib/ + venv + pip install
 echo -n '<grafana-token>' > .grafana_token && chmod 600 .grafana_token
-./venv/bin/python rack_kiosk.py --once --save=/tmp/test.png   # render without the device
+./venv/bin/python tools/render_app.py "Rack Kiosk" 0 /tmp/test.png   # render without the device
+./venv/bin/python -m turzx       # run against the display
 ```
 
-### rack_kiosk.py
-Faithful, paged copy of the Grafana **Rack Kiosk** dashboard (uid `adg8v6n`):
-- Queries Prometheus through the Grafana **datasource proxy** (`/api/datasources/proxy/uid/prometheus/...`) with a service-account token (`GRAFANA_TOKEN` env or `.grafana_token`).
-- 3 auto-cycling pages — Power & WAN, Temps & Outlets, Infra & Compute — preserving Grafana units, threshold colors, value mappings, and the two bar gauges.
-- Args: `--secs=N` (seconds/page), `--page=N` (pin one page), `--save=FILE --once` (render a PNG to inspect).
+The **Rack Kiosk** app is a faithful, paged copy of the Grafana dashboard (uid `adg8v6n`):
+queries Prometheus through the Grafana **datasource proxy** with a service-account token
+(`GRAFANA_TOKEN` env or `.grafana_token`); 3 pages (Power & WAN, Temps & Outlets, Infra &
+Compute) preserving Grafana units, threshold colors, value mappings, and the two bar gauges.
 
 ## Deploy on a headless Raspberry Pi
 
@@ -47,16 +57,17 @@ ssh kiosk
 git clone https://github.com/nutgood/turzx.git ~/turzx && cd ~/turzx
 ./setup.sh
 echo -n '<grafana-token>' > .grafana_token && chmod 600 .grafana_token
-sudo cp deploy/rack-kiosk.service /etc/systemd/system/
-sudo systemctl enable --now rack-kiosk
+cp deploy/kiosk.env.example kiosk.env   # then edit MQTT host/creds; chmod 600
+sudo cp deploy/turzx-kiosk.service /etc/systemd/system/
+sudo systemctl enable --now turzx-kiosk
 ```
 
-The service runs headless (no X/Chromium) and drives the USB display directly. It runs
-`kiosk.py`, reading optional MQTT/display settings from `kiosk.env` (see `kiosk.env.example`).
+The service runs headless (no X/Chromium) and drives the USB display directly via
+`python -m turzx`, reading optional MQTT/display settings from `kiosk.env`.
 
-## Apps & orchestrator (`kiosk.py`)
+## Apps & orchestrator
 
-`kiosk.py` cycles through **apps**, each with one or more **pages**. Built-in apps:
+`python -m turzx` cycles through **apps**, each with one or more **pages**. Built-in apps:
 - **Rack Kiosk** — the Grafana dashboard (3 pages)
 - **Clock** — large clock + date
 - **Pi Stats** — the host's CPU temp / load / memory / uptime
@@ -71,13 +82,14 @@ Cycling model (page-cycling and app-cycling are **independent**, each with its o
 
 ### Building a new app
 
-An app is any object with this contract; drop it in a module and register it.
+Add a module under `turzx/apps/` with a class implementing the `App` contract, then register it.
 
 ```python
-# myapp.py
-from rack_kiosk import W, H, font, COL, hexrgb, draw_centered, BG  # shared render helpers
+# turzx/apps/myapp.py
+from ..render import W, H, font, COL, hexrgb, draw_centered, blank
+from .base import App
 
-class MyApp:
+class MyApp(App):
     name = "My App"     # unique; appears in the HA "App" select + persisted by name/index
     n_pages = 2         # number of pages
     refresh = 5.0       # seconds between re-renders of the current page
@@ -85,28 +97,27 @@ class MyApp:
     def update(self):           # optional: fetch data; called before each render
         ...
     def render(self, page):     # REQUIRED: return a 1920x480 RGB PIL.Image for this page
-        from PIL import Image, ImageDraw
-        img = Image.new("RGB", (W, H), BG)
-        d = ImageDraw.Draw(img)
+        img, d = blank()        # fresh image + ImageDraw on the dark background
         draw_centered(d, W/2, H/2, f"page {page+1}", font(120), hexrgb(COL["text"]))
         return img
 ```
 
-Register it in `kiosk.py` → `main()`:
+Register it in `turzx/apps/__init__.py`:
 ```python
-from myapp import MyApp
-apps = [RackApp(), ClockApp(), PiStatsApp(), MyApp()]
+from .myapp import MyApp
+def default_apps():
+    return [RackApp(), ClockApp(), PiStatsApp(), MyApp()]
 ```
 
-Shared helpers in `rack_kiosk.py`: `W,H` (1920,480), `font(px)`, `COL` (Grafana palette),
+Shared helpers in `turzx/render.py`: `W,H` (1920,480), `font(px)`, `COL` (Grafana palette),
 `hexrgb`, `th_color(steps, value)` (threshold→color), `fmt(unit, value)` (watt/percent/bps/…),
-`draw_centered`, and `BG/TILE/TILE_BD/TITLE_C` colors. For Grafana data, reuse
-`rack_kiosk.fetch_all()` / the datasource-proxy `query(expr)`.
+`draw_centered`, `panel(...)`, `blank()`, and `BG/TILE/TILE_BD/TITLE_C` colors. For Grafana
+data, use `from ..grafana import query, query_many`.
 
 Tips: only the full-frame PNG path renders, so always return a full 1920×480 image.
 Iterate offline without the device:
-```python
-MyApp().render(0).save("/tmp/p.png")   # then open /tmp/p.png
+```bash
+./venv/bin/python tools/render_app.py "My App" 0 /tmp/p.png   # then open /tmp/p.png
 ```
 
 ### Home Assistant (MQTT auto-discovery)
@@ -120,7 +131,7 @@ retained MQTT discovery configs, so HA auto-creates a **TURZX Kiosk** device wit
   `binary_sensor` **Alert active**, and a `notify` action **`notify.turzx_kiosk_alert`**
 
 Renaming/removing entities? Add the old `(component, object_id)` to `LEGACY` in
-`mqtt_control.py` — retained discovery configs are cleared on connect so HA drops stale duplicates.
+`turzx/mqtt.py` — retained discovery configs are cleared on connect so HA drops stale duplicates.
 
 ### Alert service
 Instantly interrupts the display with a message for a configurable timeout, then resumes
@@ -144,5 +155,5 @@ MQTT layout: base `turzx/kiosk`; commands under `turzx/kiosk/cmd/<entity>`; reta
 ### Deploying changes to the Pi
 ```bash
 rsync -az --exclude venv --exclude lib --exclude .git --exclude kiosk.env --exclude state.json ./ kiosk:turzx/
-ssh kiosk 'sudo systemctl restart rack-kiosk'   # service name is rack-kiosk; runs kiosk.py
+ssh kiosk 'sudo systemctl restart turzx-kiosk'   # runs `python -m turzx`
 ```

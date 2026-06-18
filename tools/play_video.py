@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 
-LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")  # repo-root/lib
 sys.path.insert(0, LIB)
 
 from library.lcd.lcd_comm_turing_usb import LcdCommTuringUSB, send_video, send_sync_command, send_brightness_command

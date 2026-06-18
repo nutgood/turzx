@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""Home Assistant control for the TURZX kiosk via MQTT auto-discovery.
+"""Home Assistant control via MQTT auto-discovery.
 
-Publishes MQTT discovery configs so Home Assistant auto-creates entities to control
-the kiosk: display on/off, app select, next/prev App, next/prev Page, independent
-Auto-cycle Pages / Auto-cycle Apps toggles + their intervals, brightness, and an
-alert service (text + timeout + send, plus a rich JSON command topic for automations).
-
-Env: MQTT_HOST [MQTT_PORT=1883] [MQTT_USER] [MQTT_PASS]
+Publishes retained discovery configs so HA auto-creates a "TURZX Kiosk" device, subscribes
+to command topics, and republishes state. Env: MQTT_HOST [MQTT_PORT MQTT_USER MQTT_PASS].
 """
 import json
 import os
@@ -21,11 +16,10 @@ AVAIL = f"{BASE}/availability"
 STATE = f"{BASE}/state"
 CMD = f"{BASE}/cmd"
 DISCO = "homeassistant"
-
 DEVICE = {"identifiers": [NODE], "name": "TURZX Kiosk", "model": "Turing 8.8\"", "manufacturer": "TURZX"}
 
-# Entities that existed in older versions and must be removed from HA / the broker
-# (discovery configs are retained, so renamed entities leave stale duplicates behind).
+# Entities removed/renamed in older versions — discovery configs are retained, so we must
+# clear them on connect or HA keeps showing stale duplicates.
 LEGACY = [("switch", "auto"), ("number", "interval"), ("button", "next"), ("button", "prev")]
 
 
@@ -57,7 +51,6 @@ def _entities(app_names):
             state_topic=STATE, value_template=sv("app_interval"), min=3, max=600, step=1, unit_of_measurement="s", mode="box", icon="mdi:timer-cog")),
         ("number", "brightness", cfg("brightness", "Brightness", command_topic=f"{CMD}/brightness",
             state_topic=STATE, value_template=sv("brightness"), min=0, max=100, step=5, unit_of_measurement="%", icon="mdi:brightness-6")),
-        # ---- alert service ----
         ("text", "alert_msg", cfg("alert_msg", "Alert message", command_topic=f"{CMD}/alert_msg",
             state_topic=STATE, value_template=sv("alert_msg"), max=160, icon="mdi:message-alert")),
         ("number", "alert_timeout", cfg("alert_timeout", "Alert timeout", command_topic=f"{CMD}/alert_timeout",
@@ -66,7 +59,7 @@ def _entities(app_names):
         ("binary_sensor", "alert_active", cfg("alert_active", "Alert active", state_topic=STATE,
             value_template=sv("alert_active"), payload_on="ON", payload_off="OFF", device_class="problem")),
         # Auto-discovered notify action -> notify.turzx_kiosk_alert (message-only, no YAML).
-        # For rich/multi-property alerts use script.kiosk_alert or publish JSON to cmd/alert.
+        # Rich/multi-property alerts: script.kiosk_alert or publish JSON to cmd/alert.
         ("notify", "alert", cfg("alert", "Alert", command_topic=f"{CMD}/alert", icon="mdi:bell-alert")),
     ]
 
@@ -90,7 +83,7 @@ def start_mqtt(state):
         client.publish(STATE, json.dumps(state.status()), retain=True)
 
     def on_connect(c, *_):
-        for comp, obj in LEGACY:          # remove stale renamed entities
+        for comp, obj in LEGACY:
             c.publish(f"{DISCO}/{comp}/{NODE}/{obj}/config", "", retain=True)
         for comp, obj, conf in _entities(app_names):
             c.publish(f"{DISCO}/{comp}/{NODE}/{obj}/config", json.dumps(conf), retain=True)
@@ -126,13 +119,9 @@ def start_mqtt(state):
             elif sub == "prev_page":
                 state.prev_page()
             elif sub == "alert_msg":
-                with state.lock:
-                    state.alert_msg = payload
-                state._notify()
+                state.set_alert_msg(payload)
             elif sub == "alert_timeout":
-                with state.lock:
-                    state.alert_timeout = int(float(payload))
-                state._notify()
+                state.set_alert_timeout(float(payload))
             elif sub == "alert_send":
                 state.fire_alert({"message": state.alert_msg or "ALERT", "timeout": state.alert_timeout})
             elif sub == "alert":          # JSON props (automations) OR plain text (notify entity)

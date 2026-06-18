@@ -6,7 +6,7 @@ import time
 
 from PIL import Image, ImageDraw, ImageFont
 
-LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")  # repo-root/lib
 sys.path.insert(0, LIB)
 
 from library.lcd.lcd_comm import Orientation

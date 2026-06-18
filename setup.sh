@@ -27,5 +27,5 @@ python3 -m venv venv
 echo
 echo "Setup complete."
 echo "  1. Put your Grafana service-account token in ./.grafana_token  (chmod 600)"
-echo "  2. Test:    ./venv/bin/python rack_kiosk.py --once --save=/tmp/test.png"
-echo "  3. Service: see deploy/rack-kiosk.service"
+echo "  2. Test a render:  ./venv/bin/python tools/render_app.py 'Rack Kiosk' 0 /tmp/test.png"
+echo "  3. Run:            ./venv/bin/python -m turzx     (or install deploy/turzx-kiosk.service)"
