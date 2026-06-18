@@ -1,0 +1,78 @@
+# Home Assistant "action" to send a configurable alert to the TURZX kiosk.
+#
+# Install: Settings → Automations & Scenes → Scripts → (⋮) Edit in YAML, paste this,
+# or add under `script:` in configuration.yaml. It then appears as the action
+# `script.kiosk_alert` with a full field UI (and is callable from automations).
+#
+# It publishes all properties as JSON to turzx/kiosk/cmd/alert; the kiosk renders
+# the alert instantly and clears it after `timeout` seconds.
+
+kiosk_alert:
+  alias: "Kiosk: Send alert"
+  description: "Show a configurable alert on the TURZX kiosk display."
+  icon: mdi:bell-ring
+  fields:
+    message:
+      name: Message
+      description: Alert text (auto-sizes to fit).
+      required: true
+      example: "UPS on battery — utility power lost"
+      selector: { text: {} }
+    title:
+      name: Title
+      description: Header label.
+      default: ALERT
+      selector: { text: {} }
+    timeout:
+      name: Timeout
+      description: Seconds to display before returning to normal cycling.
+      default: 20
+      selector: { number: { min: 1, max: 600, unit_of_measurement: s, mode: box } }
+    level:
+      name: Severity
+      description: Preset color scheme + default icon.
+      default: warning
+      selector: { select: { options: [info, warning, critical, success] } }
+    icon:
+      name: Icon
+      default: warning
+      selector: { select: { options: [warning, info, error, success, none] } }
+    color:
+      name: Background color
+      description: Hex override (e.g. "#101428"). Blank = use severity preset.
+      selector: { text: {} }
+    accent:
+      name: Accent color
+      description: Border/title hex override. Blank = use severity preset.
+      selector: { text: {} }
+    text_color:
+      name: Text color
+      default: "#FFFFFF"
+      selector: { text: {} }
+    blink:
+      name: Blink
+      description: Flash the border/title.
+      default: false
+      selector: { boolean: {} }
+    size:
+      name: Font size
+      description: Message font size in px; 0 = auto-fit.
+      default: 0
+      selector: { number: { min: 0, max: 160, mode: box } }
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: turzx/kiosk/cmd/alert
+        payload: >-
+          {{ {
+            'message': message,
+            'title': title | default('ALERT'),
+            'timeout': timeout | default(20),
+            'level': level | default('warning'),
+            'icon': icon | default('warning'),
+            'color': color | default('', true),
+            'accent': accent | default('', true),
+            'text_color': text_color | default('#FFFFFF'),
+            'blink': blink | default(false),
+            'size': size | default(0)
+          } | tojson }}

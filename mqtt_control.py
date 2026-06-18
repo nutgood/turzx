@@ -2,14 +2,16 @@
 """Home Assistant control for the TURZX kiosk via MQTT auto-discovery.
 
 Publishes MQTT discovery configs so Home Assistant auto-creates entities to control
-the kiosk (display on/off, auto-cycle, app select, page nav, interval, brightness)
-and an alert service (text + timeout + send, plus a JSON command topic for automations).
+the kiosk: display on/off, app select, next/prev App, next/prev Page, independent
+Auto-cycle Pages / Auto-cycle Apps toggles + their intervals, brightness, and an
+alert service (text + timeout + send, plus a rich JSON command topic for automations).
 
 Env: MQTT_HOST [MQTT_PORT=1883] [MQTT_USER] [MQTT_PASS]
 """
 import json
 import os
 import threading
+import time
 
 import paho.mqtt.client as mqtt
 
@@ -20,47 +22,43 @@ STATE = f"{BASE}/state"
 CMD = f"{BASE}/cmd"
 DISCO = "homeassistant"
 
-DEVICE = {
-    "identifiers": [NODE],
-    "name": "TURZX Kiosk",
-    "model": "Turing 8.8\"",
-    "manufacturer": "TURZX",
-}
+DEVICE = {"identifiers": [NODE], "name": "TURZX Kiosk", "model": "Turing 8.8\"", "manufacturer": "TURZX"}
 
 
 def _entities(app_names):
-    """(component, object_id, config) for each HA entity."""
     base = {"availability_topic": AVAIL, "device": DEVICE}
 
     def cfg(obj, name, **extra):
-        c = dict(base, name=name, unique_id=f"{NODE}_{obj}", object_id=f"{NODE}_{obj}")
-        c.update(extra)
-        return c
+        return dict(base, name=name, unique_id=f"{NODE}_{obj}", object_id=f"{NODE}_{obj}", **extra)
 
     sv = lambda k: f"{{{{ value_json.{k} }}}}"  # noqa: E731
+    btn = lambda obj, name, icon: ("button", obj, cfg(obj, name, command_topic=f"{CMD}/{obj}", payload_press="PRESS", icon=icon))  # noqa: E731
     return [
         ("switch", "display", cfg("display", "Display", command_topic=f"{CMD}/display",
             state_topic=STATE, value_template=sv("display"), payload_on="ON", payload_off="OFF", icon="mdi:monitor")),
-        ("switch", "auto", cfg("auto", "Auto-cycle", command_topic=f"{CMD}/auto",
-            state_topic=STATE, value_template=sv("auto"), payload_on="ON", payload_off="OFF", icon="mdi:autorenew")),
         ("select", "app", cfg("app", "App", command_topic=f"{CMD}/app",
             state_topic=STATE, value_template=sv("app"), options=app_names, icon="mdi:view-dashboard")),
-        ("number", "interval", cfg("interval", "Page interval", command_topic=f"{CMD}/interval",
-            state_topic=STATE, value_template=sv("interval"), min=2, max=60, step=1,
-            unit_of_measurement="s", mode="box", icon="mdi:timer")),
-        ("number", "brightness", cfg("brightness", "Brightness", command_topic=f"{CMD}/brightness",
-            state_topic=STATE, value_template=sv("brightness"), min=0, max=100, step=5,
-            unit_of_measurement="%", icon="mdi:brightness-6")),
-        ("button", "next", cfg("next", "Next page", command_topic=f"{CMD}/next", payload_press="PRESS", icon="mdi:skip-next")),
-        ("button", "prev", cfg("prev", "Previous page", command_topic=f"{CMD}/prev", payload_press="PRESS", icon="mdi:skip-previous")),
         ("sensor", "page", cfg("page", "Current page", state_topic=STATE, value_template=sv("page"), icon="mdi:book-open-page-variant")),
+        btn("next_app", "Next app", "mdi:page-next"),
+        btn("prev_app", "Previous app", "mdi:page-previous"),
+        btn("next_page", "Next page", "mdi:skip-next"),
+        btn("prev_page", "Previous page", "mdi:skip-previous"),
+        ("switch", "auto_page", cfg("auto_page", "Auto-cycle pages", command_topic=f"{CMD}/auto_page",
+            state_topic=STATE, value_template=sv("auto_page"), payload_on="ON", payload_off="OFF", icon="mdi:autorenew")),
+        ("switch", "auto_app", cfg("auto_app", "Auto-cycle apps", command_topic=f"{CMD}/auto_app",
+            state_topic=STATE, value_template=sv("auto_app"), payload_on="ON", payload_off="OFF", icon="mdi:rotate-3d-variant")),
+        ("number", "page_interval", cfg("page_interval", "Page interval", command_topic=f"{CMD}/page_interval",
+            state_topic=STATE, value_template=sv("page_interval"), min=2, max=120, step=1, unit_of_measurement="s", mode="box", icon="mdi:timer")),
+        ("number", "app_interval", cfg("app_interval", "App interval", command_topic=f"{CMD}/app_interval",
+            state_topic=STATE, value_template=sv("app_interval"), min=3, max=600, step=1, unit_of_measurement="s", mode="box", icon="mdi:timer-cog")),
+        ("number", "brightness", cfg("brightness", "Brightness", command_topic=f"{CMD}/brightness",
+            state_topic=STATE, value_template=sv("brightness"), min=0, max=100, step=5, unit_of_measurement="%", icon="mdi:brightness-6")),
         # ---- alert service ----
         ("text", "alert_msg", cfg("alert_msg", "Alert message", command_topic=f"{CMD}/alert_msg",
-            state_topic=STATE, value_template=sv("alert_msg"), max=120, icon="mdi:message-alert")),
+            state_topic=STATE, value_template=sv("alert_msg"), max=160, icon="mdi:message-alert")),
         ("number", "alert_timeout", cfg("alert_timeout", "Alert timeout", command_topic=f"{CMD}/alert_timeout",
-            state_topic=STATE, value_template=sv("alert_timeout"), min=1, max=600, step=1,
-            unit_of_measurement="s", mode="box", icon="mdi:timer-alert")),
-        ("button", "alert_send", cfg("alert_send", "Send alert", command_topic=f"{CMD}/alert_send", payload_press="PRESS", icon="mdi:bell-ring")),
+            state_topic=STATE, value_template=sv("alert_timeout"), min=1, max=600, step=1, unit_of_measurement="s", mode="box", icon="mdi:timer-alert")),
+        btn("alert_send", "Send alert", "mdi:bell-ring"),
         ("binary_sensor", "alert_active", cfg("alert_active", "Alert active", state_topic=STATE,
             value_template=sv("alert_active"), payload_on="ON", payload_off="OFF", device_class="problem")),
     ]
@@ -79,7 +77,6 @@ def start_mqtt(state):
     if user:
         client.username_pw_set(user, pw)
     client.will_set(AVAIL, "offline", retain=True)
-
     app_names = [a.name for a in state.apps]
 
     def publish_state():
@@ -95,21 +92,30 @@ def start_mqtt(state):
     def on_message(c, u, msg):
         sub = msg.topic.rsplit("/", 1)[-1]
         payload = msg.payload.decode(errors="replace").strip()
+        on = payload.upper() == "ON"
         try:
             if sub == "display":
-                state.set_display(payload.upper() == "ON")
-            elif sub == "auto":
-                state.set_auto(payload.upper() == "ON")
+                state.set_display(on)
+            elif sub == "auto_page":
+                state.set_auto_page(on)
+            elif sub == "auto_app":
+                state.set_auto_app(on)
             elif sub == "app":
                 state.set_app(payload)
-            elif sub == "interval":
-                state.set_dwell(float(payload))
+            elif sub == "page_interval":
+                state.set_page_interval(float(payload))
+            elif sub == "app_interval":
+                state.set_app_interval(float(payload))
             elif sub == "brightness":
                 state.set_brightness(int(float(payload)))
-            elif sub == "next":
-                state.nav(1)
-            elif sub == "prev":
-                state.nav(-1)
+            elif sub == "next_app":
+                state.next_app()
+            elif sub == "prev_app":
+                state.prev_app()
+            elif sub == "next_page":
+                state.next_page()
+            elif sub == "prev_page":
+                state.prev_page()
             elif sub == "alert_msg":
                 with state.lock:
                     state.alert_msg = payload
@@ -119,16 +125,15 @@ def start_mqtt(state):
                     state.alert_timeout = int(float(payload))
                 state._notify()
             elif sub == "alert_send":
-                state.fire_alert(state.alert_msg or "ALERT", state.alert_timeout)
-            elif sub == "alert":          # JSON {text, timeout} for automations
-                data = json.loads(payload)
-                state.fire_alert(data.get("text", "ALERT"), data.get("timeout", state.alert_timeout))
+                state.fire_alert({"message": state.alert_msg or "ALERT", "timeout": state.alert_timeout})
+            elif sub == "alert":          # full JSON props for HA automations / the alert action
+                state.fire_alert(json.loads(payload))
         except Exception as e:
             print(f"mqtt cmd error ({sub}): {e}", flush=True)
 
     client.on_connect = on_connect
     client.on_message = on_message
-    state.on_change = publish_state            # republish whenever state changes
+    state.on_change = publish_state
     client.connect_async(host, port, keepalive=30)
     client.loop_start()
     threading.Thread(target=_heartbeat, args=(publish_state,), daemon=True).start()
@@ -136,7 +141,6 @@ def start_mqtt(state):
 
 
 def _heartbeat(publish_state, period=30):
-    import time
     while True:
         time.sleep(period)
         try:

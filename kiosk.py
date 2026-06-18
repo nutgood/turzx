@@ -2,13 +2,14 @@
 """TURZX kiosk orchestrator.
 
 Cycles through "apps" (each with one or more pages) on the Turing 8.8" USB display.
-Supports an instant alert overlay (configurable timeout) and optional Home Assistant
-control via MQTT auto-discovery (see mqtt_control.py).
+Page-cycling (within an app) and app-cycling are independent: each has its own
+on/off toggle and its own interval. Supports an instant alert overlay (configurable
+timeout) and optional Home Assistant control via MQTT auto-discovery (mqtt_control.py).
 
 Config via env:
-  GRAFANA_TOKEN / .grafana_token      Grafana service-account token (for the dashboard app)
+  GRAFANA_TOKEN / .grafana_token        Grafana token (dashboard app)
   MQTT_HOST [MQTT_PORT MQTT_USER MQTT_PASS]   enable Home Assistant MQTT control
-  KIOSK_DWELL (default 7)  KIOSK_BRIGHTNESS (default 70)
+  KIOSK_PAGE_INTERVAL (default 7)  KIOSK_APP_INTERVAL (default 30)  KIOSK_BRIGHTNESS (default 70)
 """
 import os
 import socket
@@ -24,7 +25,7 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 sys.path.insert(0, HERE)
 
 import rack_kiosk as RK  # reuse the dashboard rendering + helpers
-from rack_kiosk import COL, W, H, font, hexrgb, draw_centered, fmt
+from rack_kiosk import COL, W, H, font, hexrgb, draw_centered
 
 from library.lcd.lcd_comm import Orientation
 from library.lcd.lcd_comm_turing_usb import LcdCommTuringUSB
@@ -140,23 +141,24 @@ class PiStatsApp(App):
 
 # ───────────────────────────── state ─────────────────────────────
 class State:
-    def __init__(self, apps, dwell, brightness):
+    def __init__(self, apps, page_interval, app_interval, brightness):
         self.apps = apps
         self.lock = threading.RLock()
         self.wake = threading.Event()
         self.app_idx = 0
         self.page_idx = 0
-        self.auto = True
-        self.dwell = dwell
+        self.auto_page = True            # cycle pages within the current app
+        self.auto_app = True             # cycle through apps
+        self.page_interval = page_interval
+        self.app_interval = app_interval
         self.display_on = True
         self.brightness = brightness
-        self.alert_text = None
+        self.alert_props = None          # dict of alert properties, or None
         self.alert_until = 0.0
-        self.alert_msg = ""          # buffer for HA text entity
-        self.alert_timeout = 20      # buffer for HA number entity
-        self.on_change = None        # set by MQTT to publish state
+        self.alert_msg = ""              # buffer for HA text entity
+        self.alert_timeout = 20          # buffer for HA number entity
+        self.on_change = None            # set by MQTT to publish state
 
-    # ---- mutations (thread-safe) ----
     def _notify(self):
         self.wake.set()
         if self.on_change:
@@ -165,6 +167,7 @@ class State:
             except Exception:
                 pass
 
+    # ---- app navigation ----
     def set_app(self, name_or_idx):
         with self.lock:
             if isinstance(name_or_idx, int):
@@ -177,33 +180,58 @@ class State:
             self.page_idx = 0
         self._notify()
 
-    def set_page(self, idx):
+    def next_app(self):
         with self.lock:
-            self.page_idx = max(0, int(idx)) % self.apps[self.app_idx].n_pages
-        self._notify()
-
-    def nav(self, delta):
-        with self.lock:
-            self._advance(delta)
-        self._notify()
-
-    def _advance(self, delta=1):
-        self.page_idx += delta
-        if self.page_idx >= self.apps[self.app_idx].n_pages:
-            self.page_idx = 0
             self.app_idx = (self.app_idx + 1) % len(self.apps)
-        elif self.page_idx < 0:
-            self.app_idx = (self.app_idx - 1) % len(self.apps)
-            self.page_idx = self.apps[self.app_idx].n_pages - 1
-
-    def set_auto(self, on):
-        with self.lock:
-            self.auto = bool(on)
+            self.page_idx = 0
         self._notify()
 
-    def set_dwell(self, secs):
+    def prev_app(self):
         with self.lock:
-            self.dwell = max(2.0, float(secs))
+            self.app_idx = (self.app_idx - 1) % len(self.apps)
+            self.page_idx = 0
+        self._notify()
+
+    # ---- page navigation (within the current app) ----
+    def next_page(self):
+        with self.lock:
+            self.page_idx = (self.page_idx + 1) % self.apps[self.app_idx].n_pages
+        self._notify()
+
+    def prev_page(self):
+        with self.lock:
+            self.page_idx = (self.page_idx - 1) % self.apps[self.app_idx].n_pages
+        self._notify()
+
+    # ---- internal auto-advances (used by the loop timers) ----
+    def adv_page(self):
+        with self.lock:
+            self.page_idx = (self.page_idx + 1) % self.apps[self.app_idx].n_pages
+
+    def adv_app(self):
+        with self.lock:
+            self.app_idx = (self.app_idx + 1) % len(self.apps)
+            self.page_idx = 0
+
+    # ---- settings ----
+    def set_auto_page(self, on):
+        with self.lock:
+            self.auto_page = bool(on)
+        self._notify()
+
+    def set_auto_app(self, on):
+        with self.lock:
+            self.auto_app = bool(on)
+        self._notify()
+
+    def set_page_interval(self, secs):
+        with self.lock:
+            self.page_interval = max(2.0, float(secs))
+        self._notify()
+
+    def set_app_interval(self, secs):
+        with self.lock:
+            self.app_interval = max(3.0, float(secs))
         self._notify()
 
     def set_display(self, on):
@@ -216,33 +244,44 @@ class State:
             self.brightness = max(0, min(100, int(level)))
         self._notify()
 
-    def fire_alert(self, text, timeout):
+    def fire_alert(self, props):
+        """props: dict of alert properties (message, timeout, title, level, color,
+        accent, text_color, icon, blink, size). A bare string is treated as message."""
+        p = dict(props) if isinstance(props, dict) else {"message": str(props)}
+        try:
+            to = float(p.get("timeout"))
+        except (TypeError, ValueError):
+            to = self.alert_timeout
         with self.lock:
-            self.alert_text = str(text)
-            self.alert_until = time.time() + max(1, float(timeout))
+            self.alert_props = p
+            self.alert_until = time.time() + max(1, to)
         self._notify()
 
     def clear_alert(self):
         with self.lock:
             self.alert_until = 0.0
-            self.alert_text = None
+            self.alert_props = None
         self._notify()
 
     def snapshot(self):
         with self.lock:
-            return dict(app_idx=self.app_idx, page_idx=self.page_idx, auto=self.auto,
-                        dwell=self.dwell, display_on=self.display_on, brightness=self.brightness,
-                        alert_text=self.alert_text, alert_until=self.alert_until)
+            return dict(app_idx=self.app_idx, page_idx=self.page_idx,
+                        auto_page=self.auto_page, auto_app=self.auto_app,
+                        page_interval=self.page_interval, app_interval=self.app_interval,
+                        display_on=self.display_on, brightness=self.brightness,
+                        alert_props=self.alert_props, alert_until=self.alert_until)
 
     def status(self):
         with self.lock:
             app = self.apps[self.app_idx]
             return {
                 "display": "ON" if self.display_on else "OFF",
-                "auto": "ON" if self.auto else "OFF",
+                "auto_page": "ON" if self.auto_page else "OFF",
+                "auto_app": "ON" if self.auto_app else "OFF",
                 "app": app.name,
                 "page": f"{self.page_idx + 1}/{app.n_pages}",
-                "interval": int(self.dwell),
+                "page_interval": int(self.page_interval),
+                "app_interval": int(self.app_interval),
                 "brightness": self.brightness,
                 "alert_active": "ON" if (self.alert_until > time.time()) else "OFF",
                 "alert_msg": self.alert_msg,
@@ -266,26 +305,74 @@ def _wrap(d, text, fnt, maxw):
     return lines
 
 
-def render_alert(text, remaining):
-    img = Image.new("RGB", (W, H), (44, 10, 12))
+# severity presets: (background, accent color name, default icon)
+LEVELS = {
+    "info":     {"bg": (10, 20, 44), "accent": "blue", "icon": "info"},
+    "warning":  {"bg": (44, 30, 8), "accent": "orange", "icon": "warning"},
+    "critical": {"bg": (46, 10, 12), "accent": "red", "icon": "error"},
+    "success":  {"bg": (10, 34, 16), "accent": "green", "icon": "success"},
+}
+
+
+def _hexc(s, default):
+    try:
+        return hexrgb(s) if s else default
+    except Exception:
+        return default
+
+
+def _draw_icon(d, kind, cx, cy, r, color):
+    if kind == "none":
+        return
+    if kind == "warning":
+        d.polygon([(cx, cy - r), (cx - r, cy + r), (cx + r, cy + r)], outline=color, width=4)
+        draw_centered(d, cx, cy + 4, "!", font(int(r)), color)
+    elif kind == "info":
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=4)
+        draw_centered(d, cx, cy, "i", font(int(r * 1.2)), color)
+    elif kind == "error":
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=4)
+        d.line([cx - r * .4, cy - r * .4, cx + r * .4, cy + r * .4], fill=color, width=4)
+        d.line([cx - r * .4, cy + r * .4, cx + r * .4, cy - r * .4], fill=color, width=4)
+    elif kind == "success":
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=4)
+        d.line([cx - r * .45, cy, cx - r * .05, cy + r * .4], fill=color, width=5)
+        d.line([cx - r * .05, cy + r * .4, cx + r * .5, cy - r * .45], fill=color, width=5)
+
+
+def render_alert(props, remaining, blink_on=True):
+    p = props or {}
+    L = LEVELS.get(str(p.get("level") or "warning").lower(), LEVELS["warning"])
+    bg = _hexc(p.get("color"), L["bg"])
+    accent = _hexc(p.get("accent"), hexrgb(COL.get(L["accent"], "#F2495C")))
+    txtcol = _hexc(p.get("text_color"), (255, 255, 255))
+    icon = str(p.get("icon") or L["icon"]).lower()
+    title = str(p.get("title") or "ALERT")
+    message = str(p.get("message") or "")
+    show = (not p.get("blink")) or blink_on   # blink hides the chrome on the off-beat
+
+    img = Image.new("RGB", (W, H), bg)
     d = ImageDraw.Draw(img)
-    red = hexrgb(COL["red"])
-    d.rectangle([0, 0, W, 8], fill=red)
-    d.rectangle([0, H - 8, W, H], fill=red)
-    # warning triangle (drawn, not glyph) + label
-    d.polygon([(54, 56), (30, 26), (78, 26)], outline=red, width=4)
-    d.text((50, 33), "!", font=font(30), fill=red)
-    d.text((92, 20), "ALERT", font=font(46), fill=red)
-    d.text((W - 150, 24), f"{int(remaining)}s", font=font(34), fill=(210, 150, 150))
-    fnt = font(96)
-    lines = _wrap(d, text, fnt, W - 100)
-    while len(lines) > 3 and fnt.size > 40:          # shrink to fit ≤3 lines
+    if show:
+        d.rectangle([0, 0, W, 8], fill=accent)
+        d.rectangle([0, H - 8, W, H], fill=accent)
+        _draw_icon(d, icon, 52, 40, 24, accent)
+        d.text((92, 18), title.upper(), font=font(46), fill=accent)
+    d.text((W - 150, 24), f"{int(remaining)}s", font=font(34), fill=(210, 180, 180))
+
+    try:
+        size = int(p.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    fnt = font(size if size > 0 else 96)
+    lines = _wrap(d, message, fnt, W - 100)
+    while size <= 0 and len(lines) > 3 and fnt.size > 40:   # auto-shrink to ≤3 lines
         fnt = font(fnt.size - 8)
-        lines = _wrap(d, text, fnt, W - 100)
+        lines = _wrap(d, message, fnt, W - 100)
     total_h = len(lines) * (fnt.size + 10)
     y = (H - total_h) / 2 + 24
     for ln in lines:
-        draw_centered(d, W / 2, y + fnt.size / 2, ln, fnt, (255, 255, 255))
+        draw_centered(d, W / 2, y + fnt.size / 2, ln, fnt, txtcol)
         y += fnt.size + 10
     return img
 
@@ -304,12 +391,12 @@ def wait_for_grafana(timeout=30):
 
 
 def main():
-    dwell = float(os.environ.get("KIOSK_DWELL", "7"))
+    page_interval = float(os.environ.get("KIOSK_PAGE_INTERVAL", os.environ.get("KIOSK_DWELL", "7")))
+    app_interval = float(os.environ.get("KIOSK_APP_INTERVAL", "30"))
     brightness = int(os.environ.get("KIOSK_BRIGHTNESS", "70"))
     apps = [RackApp(), ClockApp(), PiStatsApp()]
-    state = State(apps, dwell, brightness)
+    state = State(apps, page_interval, app_interval, brightness)
 
-    # optional Home Assistant MQTT control
     if os.environ.get("MQTT_HOST"):
         try:
             from mqtt_control import start_mqtt
@@ -324,6 +411,8 @@ def main():
     lcd.SetOrientation(Orientation.LANDSCAPE)
     applied_bri = -1
     applied_on = None
+    page_due = None
+    app_due = None
 
     while True:
         st = state.snapshot()
@@ -333,6 +422,7 @@ def main():
             if applied_on is not False:
                 lcd.SetBrightness(0)
                 applied_on = False
+            page_due = app_due = None
             state.wake.wait(timeout=2)
             state.wake.clear()
             continue
@@ -342,14 +432,28 @@ def main():
             applied_on = True
 
         now = time.time()
-        # alert overlay (instant, time-limited)
-        if st["alert_text"] and st["alert_until"] > now:
-            lcd.DisplayPILImage(render_alert(st["alert_text"], st["alert_until"] - now))
-            state.wake.wait(timeout=min(1.0, st["alert_until"] - now))
+        # alert overlay (instant, time-limited) — overrides everything
+        if st["alert_props"] and st["alert_until"] > now:
+            blink_on = int(now * 2) % 2 == 0
+            lcd.DisplayPILImage(render_alert(st["alert_props"], st["alert_until"] - now, blink_on))
+            page_due = app_due = None       # re-arm cycle timers after the alert clears
+            state.wake.wait(timeout=min(0.5, st["alert_until"] - now))
             state.wake.clear()
             continue
 
-        # normal app/page
+        # arm independent cycle timers
+        if st["auto_page"]:
+            if page_due is None:
+                page_due = now + st["page_interval"]
+        else:
+            page_due = None
+        if st["auto_app"]:
+            if app_due is None:
+                app_due = now + st["app_interval"]
+        else:
+            app_due = None
+
+        # render current app/page
         app = apps[st["app_idx"]]
         try:
             app.update()
@@ -359,13 +463,22 @@ def main():
         if state.on_change:
             state.on_change()
 
-        woken = state.wake.wait(timeout=st["dwell"] if st["auto"] else 3600)
+        deadlines = [d for d in (page_due, app_due) if d is not None]
+        timeout = max(0.0, min(deadlines) - time.time()) if deadlines else 3600
+        woken = state.wake.wait(timeout=timeout)
         state.wake.clear()
         if woken:
-            continue          # react to control change; don't auto-advance
-        if st["auto"]:
-            with state.lock:
-                state._advance()
+            page_due = app_due = None       # control changed — re-arm from now, re-render
+            continue
+
+        now2 = time.time()
+        if app_due is not None and now2 >= app_due:     # app cycle fires (takes priority)
+            state.adv_app()
+            app_due = now2 + st["app_interval"]
+            page_due = (now2 + st["page_interval"]) if st["auto_page"] else None
+        elif page_due is not None and now2 >= page_due:  # page cycle fires (stays within app)
+            state.adv_page()
+            page_due = now2 + st["page_interval"]
 
 
 if __name__ == "__main__":
