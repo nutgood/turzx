@@ -14,7 +14,9 @@ USB protocol (libusb bulk transfers, DES-encrypted command packets), driven via 
 
 | Script | Purpose |
 |---|---|
-| `rack_kiosk.py` | **Main app** — replica of the Grafana "Rack Kiosk" dashboard, auto-cycling pages. Queries Prometheus via the Grafana datasource proxy and renders to the display. |
+| `kiosk.py` | **Main entrypoint** — orchestrator that cycles through *apps* (Rack Kiosk dashboard, Clock, Pi Stats), with an instant alert overlay and optional Home Assistant MQTT control. |
+| `mqtt_control.py` | Home Assistant MQTT auto-discovery + command handling (used by `kiosk.py`). |
+| `rack_kiosk.py` | The Grafana "Rack Kiosk" dashboard replica (one of the apps; also runnable standalone). Queries Prometheus via the Grafana datasource proxy. |
 | `stream_clock.py` | Live, on-the-fly H.264 stream of the current time (incl. milliseconds). |
 | `hello_world.py`, `show.py`, `random_graphs.py`, `animate.py`, `make_video.py`, `play_video.py`, `brightness_sweep.py`, `recover.py` | Capability demos (static images, animation, native H.264 video playback, brightness, USB recovery). Some hardcode macOS font paths. |
 
@@ -49,4 +51,33 @@ sudo cp deploy/rack-kiosk.service /etc/systemd/system/
 sudo systemctl enable --now rack-kiosk
 ```
 
-The service runs headless (no X/Chromium) and drives the USB display directly.
+The service runs headless (no X/Chromium) and drives the USB display directly. It runs
+`kiosk.py`, reading optional MQTT/display settings from `kiosk.env` (see `kiosk.env.example`).
+
+## Apps & Home Assistant
+
+`kiosk.py` cycles through **apps**, each with one or more pages:
+- **Rack Kiosk** — the Grafana dashboard (3 pages)
+- **Clock** — large clock + date
+- **Pi Stats** — the host's CPU temp / load / memory / uptime
+
+### Home Assistant (MQTT auto-discovery)
+Set `MQTT_HOST` (+ `MQTT_USER`/`MQTT_PASS`) in `kiosk.env`. On start the kiosk publishes
+MQTT discovery configs, so HA auto-creates a **TURZX Kiosk** device with:
+`switch` Display, `switch` Auto-cycle, `select` App, `number` Page interval, `number`
+Brightness, `button` Next/Previous page, `sensor` Current page, plus the alert controls
+(`text` Alert message, `number` Alert timeout, `button` Send alert, `binary_sensor` Alert active).
+
+### Alert service
+Instantly interrupts the display with a message for a configurable timeout, then resumes
+cycling. Trigger it from an HA automation by publishing JSON to the command topic:
+
+```yaml
+service: mqtt.publish
+data:
+  topic: turzx/kiosk/cmd/alert
+  payload: '{"text": "UPS on battery — power lost", "timeout": 30}'
+```
+
+(or use the discovered *Alert message* + *Alert timeout* + *Send alert* entities in the HA UI).
+Base topic `turzx/kiosk`; command topics under `turzx/kiosk/cmd/<entity>`; retained state at `turzx/kiosk/state`.
