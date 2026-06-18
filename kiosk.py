@@ -211,7 +211,11 @@ class State:
                 pass
         self._save()
 
-    # ---- app navigation ----
+    def _clear_alert_locked(self):
+        self.alert_until = 0.0
+        self.alert_props = None
+
+    # ---- app navigation (also dismisses any active alert) ----
     def set_app(self, name_or_idx):
         with self.lock:
             if isinstance(name_or_idx, int):
@@ -222,29 +226,34 @@ class State:
                         self.app_idx = i
                         break
             self.page_idx = 0
+            self._clear_alert_locked()
         self._notify()
 
     def next_app(self):
         with self.lock:
             self.app_idx = (self.app_idx + 1) % len(self.apps)
             self.page_idx = 0
+            self._clear_alert_locked()
         self._notify()
 
     def prev_app(self):
         with self.lock:
             self.app_idx = (self.app_idx - 1) % len(self.apps)
             self.page_idx = 0
+            self._clear_alert_locked()
         self._notify()
 
-    # ---- page navigation (within the current app) ----
+    # ---- page navigation (within the current app; also dismisses any active alert) ----
     def next_page(self):
         with self.lock:
             self.page_idx = (self.page_idx + 1) % self.apps[self.app_idx].n_pages
+            self._clear_alert_locked()
         self._notify()
 
     def prev_page(self):
         with self.lock:
             self.page_idx = (self.page_idx - 1) % self.apps[self.app_idx].n_pages
+            self._clear_alert_locked()
         self._notify()
 
     # ---- internal auto-advances (used by the loop timers) ----
