@@ -1,0 +1,23 @@
+# Secrets — never commit
+.grafana_token
+
+# Vendored upstream driver (cloned by setup.sh)
+lib/
+
+# Python venv / caches
+venv/
+__pycache__/
+*.pyc
+
+# Generated artifacts / captures
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.h264
+rackkiosk.json
+
+# stray logs
+log.log
+*.log

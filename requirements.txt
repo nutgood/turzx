@@ -1,0 +1,9 @@
+# Core deps for driving the TURZX / Turing USB display and the rack-kiosk dashboard
+pyusb>=1.2          # libusb access to the vendor-specific USB display
+pycryptodome>=3.20  # DES command-packet encryption used by the firmware
+Pillow>=10.1        # image rendering (load_default(size=) needs >=10.1)
+pyserial>=3.5       # imported by the upstream lcd_comm base module
+numpy>=1.26         # used by the upstream serializer and some demo scripts
+
+# Optional, only for the matplotlib demo (random_graphs.py); heavy on RPi:
+# matplotlib

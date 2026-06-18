@@ -1,0 +1,16 @@
+[Unit]
+Description=TURZX Rack Kiosk — drives the Turing 8.8" USB display with the Grafana dashboard
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root for direct libusb access to the vendor-specific USB display.
+User=root
+WorkingDirectory=/home/kiosk/turzx
+ExecStart=/home/kiosk/turzx/venv/bin/python /home/kiosk/turzx/rack_kiosk.py --secs=7
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
