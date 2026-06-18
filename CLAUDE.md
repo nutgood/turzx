@@ -1,6 +1,10 @@
 # Turing 8.8" Smart Screen — project notes
 
-Driving a physical **Turing 8.8" smart screen** connected to this Mac (Apple Silicon).
+Driving a physical **Turing 8.8" smart screen**. Developed on this Mac (Apple Silicon);
+**deployed headless on a Raspberry Pi 5** (`ssh kiosk`, user `kiosk`) where it runs as the
+`rack-kiosk.service` systemd unit (runs `kiosk.py` as root for USB access). Repo is pushed to
+`github.com/nutgood/turzx`. The Pi reaches Grafana/MQTT over Tailscale + LAN.
+**To build/extend apps, see the "Building a new app" guide in README.md.**
 
 ## The hardware (verified by inspection, not docs)
 
@@ -37,8 +41,52 @@ Driving a physical **Turing 8.8" smart screen** connected to this Mac (Apple Sil
 - To recover a desynced/corrupted screen: **`recover.py`** does a `dev.reset()` (USB port reset clears the firmware's half-read buffer) + sync + Clear + clean frame. A physical replug also works (and re-enumerates).
 - After a replug the device briefly disappears; re-check presence before launching.
 
+## App framework / orchestrator (`kiosk.py`) — the production entrypoint
+
+`kiosk.py` is what the service runs. It owns the display and cycles **apps**, each with **pages**.
+- **App contract:** `name` (unique str, shown in HA App select), `n_pages` (int), `refresh`
+  (float secs between re-renders of the current page), `update()` (optional data fetch),
+  `render(page) -> 1920×480 RGB PIL.Image`. Register by adding an instance to the `apps = [...]`
+  list in `main()`. Built-in: `RackApp` (wraps `rack_kiosk`), `ClockApp`, `PiStatsApp`.
+- **Two independent cycles:** page-cycle (within app) and app-cycle, each its own on/off toggle
+  + interval, driven by separate timers in the loop. Per-app `refresh` re-renders the current
+  page on its own cadence (Clock 1s, dashboard 2s) — that's why the loop's wait deadline is
+  `min(page_due, app_due, render_due)`.
+- **`State`** is the single source of truth (thread-safe). User/MQTT changes call `_notify()`
+  (wake loop + publish + save); **auto-cycle advances (`adv_page`/`adv_app`) deliberately do NOT
+  call `_notify`**, so persistence/ MQTT chatter don't fire on every tick.
+- **Persistence:** `State.PERSIST` keys are written to `state.json` (atomic) on every `_notify`
+  and restored on construction. Don't persist transient alert state. (SD-card-friendly: no
+  per-tick writes.)
+- **Alert overlay:** `fire_alert(props)` sets `alert_props` + `alert_until`; the loop renders it
+  over everything until timeout. Props: message/title/timeout/level/color/accent/text_color/
+  icon/blink/size (`render_alert`). Nav (`next/prev app/page`, `set_app`) clears the alert
+  instantly via `_clear_alert_locked()`.
+
+## Home Assistant / MQTT (`mqtt_control.py`)
+
+- Started by `kiosk.py` if `MQTT_HOST` is set (from `kiosk.env`, an EnvironmentFile in the unit).
+- Publishes retained HA **discovery** configs → auto-creates the "TURZX Kiosk" device. Entities
+  are generated from `_entities(app_names)`; the App select options come from app names.
+- **Gotcha (cost a round):** discovery configs are **retained**. Renaming/removing an entity
+  leaves a stale retained config → duplicate HA entities. Fix: add the old `(component, object_id)`
+  to `LEGACY`; `on_connect` publishes empty retained payloads to clear them.
+- Control topics: `turzx/kiosk/cmd/<entity>`; retained state JSON `turzx/kiosk/state`;
+  availability (LWT) `turzx/kiosk/availability`. The `cmd/alert` topic accepts JSON props or
+  plain text. A `notify` discovery entity gives `notify.turzx_kiosk_alert` (HA has no discovery
+  for a multi-field custom action — that's what `deploy/ha-kiosk-alert.yaml` / `script.kiosk_alert` is for).
+
+## Deploy / RPi notes
+
+- `setup.sh` is cross-platform (Linux: apt installs `python3-venv libusb-1.0-0 fonts-dejavu-core git ffmpeg`, clones `lib/`, builds venv). Fonts: code finds macOS Helvetica → Linux DejaVu (don't hardcode macOS paths in new apps; use `rack_kiosk.font`).
+- Deploy = rsync (or git pull) + `sudo systemctl restart rack-kiosk`. Secrets (`.grafana_token`, `kiosk.env`) live only on the Pi (gitignored); `state.json` is per-host (gitignored).
+- The old display driver on the Pi was **grafana-kiosk** (Chromium via `~/.xinitrc`/startx on tty1) — removed (autostart neutralized in `~/.bash_profile`, backups `.bak`).
+- macOS-Linux gotcha: `pkill -f <pattern>` matches your own SSH shell's argv — don't `pkill -f xinit` while a file named `.xinitrc` is in your command line.
+
 ## Scripts
 
+- `kiosk.py` — **production orchestrator** (apps + pages + MQTT + alerts + persistence). What the service runs.
+- `mqtt_control.py` — Home Assistant MQTT auto-discovery + command handling.
 - `hello_world.py` — minimal static "Hello World".
 - `show.py "TEXT" [landscape|reverse]` — static test frame with orientation markers.
 - `random_graphs.py [landscape|reverse]` — matplotlib assortment of random charts.
