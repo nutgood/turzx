@@ -1,5 +1,5 @@
 [Unit]
-Description=TURZX Rack Kiosk — drives the Turing 8.8" USB display with the Grafana dashboard
+Description=TURZX Kiosk — drives the Turing 8.8" USB display (apps + Grafana dashboard + HA/MQTT)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
@@ -8,7 +8,9 @@ Type=simple
 # Runs as root for direct libusb access to the vendor-specific USB display.
 User=root
 WorkingDirectory=/home/kiosk/turzx
-ExecStart=/home/kiosk/turzx/venv/bin/python /home/kiosk/turzx/rack_kiosk.py --secs=7
+# Optional env (MQTT broker creds, dwell, brightness) — see kiosk.env.example
+EnvironmentFile=-/home/kiosk/turzx/kiosk.env
+ExecStart=/home/kiosk/turzx/venv/bin/python /home/kiosk/turzx/kiosk.py
 Restart=always
 RestartSec=5
 

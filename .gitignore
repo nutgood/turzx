@@ -21,3 +21,6 @@ rackkiosk.json
 # stray logs
 log.log
 *.log
+
+# local secrets / env
+kiosk.env
