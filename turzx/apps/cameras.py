@@ -79,11 +79,29 @@ class CamerasApp(App):
         """Run the composite pipeline and feed the display until should_stop() is true."""
         dev = lcd.dev
         fps = int(self.cfg.get("fps", 20))
-        chunk = h264.preamble(dev, brightness=brightness, fps=fps)
+        # Show a clean placeholder while RTSP connects + cameras deliver their first keyframes
+        # (~1-2s) instead of leaving the display in a blank/gray video buffer.
+        try:
+            lcd.DisplayPILImage(self.render(0))
+        except Exception:
+            pass
         ff = subprocess.Popen(self._ffmpeg_cmd(fps), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         out_fd = ff.stdout.fileno()
         last_status = 0.0
         try:
+            # Wait for ffmpeg's first output (begins with SPS/PPS + IDR) BEFORE switching the
+            # device into video mode — so the decoder's first input is a keyframe, not garbage.
+            first = b""
+            while not should_stop() and not first:
+                r, _, _ = select.select([out_fd], [], [], 0.3)
+                if r:
+                    first = os.read(out_fd, 1 << 18)
+                    if not first:
+                        return                                   # ffmpeg exited before any output
+            if should_stop():
+                return
+            chunk = h264.preamble(dev, brightness=brightness, fps=fps)
+            h264.send_chunk(dev, first)
             while not should_stop():
                 r, _, _ = select.select([out_fd], [], [], 0.3)   # wake to re-check stop even if stalled
                 if not r:
