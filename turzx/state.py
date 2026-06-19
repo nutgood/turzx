@@ -49,6 +49,13 @@ class State:
             for k in self.PERSIST:
                 if k in d:
                     setattr(self, k, d[k])
+            # prefer matching the app by name (robust to the app list changing)
+            name = d.get("app_name")
+            if name:
+                for i, a in enumerate(self.apps):
+                    if a.name == name:
+                        self.app_idx = i
+                        break
             self.app_idx %= len(self.apps)
             self.page_idx %= self.apps[self.app_idx].n_pages
             self.brightness = max(0, min(100, int(self.brightness)))
@@ -61,6 +68,7 @@ class State:
         try:
             with self.lock:
                 d = {k: getattr(self, k) for k in self.PERSIST}
+                d["app_name"] = self.apps[self.app_idx].name
             tmp = self.persist_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(d, f)

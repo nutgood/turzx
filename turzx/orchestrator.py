@@ -104,6 +104,34 @@ def main():
                 state.wake.clear()
                 continue
 
+            app = apps[st["app_idx"]]
+            # streaming apps (e.g. Cameras) drive the display directly via H.264 while active
+            if getattr(app, "stream", None):
+                idx = st["app_idx"]
+                started = time.time()
+
+                def _stop():
+                    s = state.snapshot()
+                    return (not s["display_on"]
+                            or (s["alert_props"] and s["alert_until"] > time.time())
+                            or s["app_idx"] != idx
+                            or state.wake.is_set()
+                            or (s["auto_app"] and time.time() - started >= s["app_interval"])
+                            or not present())
+
+                app.stream(lcd, _stop, st["brightness"])
+                applied_on = None              # video mode left the device in a new state
+                state.wake.clear()
+                if not present():
+                    raise ConnectionError("display absent")
+                s2 = state.snapshot()
+                if (s2["auto_app"] and time.time() - started >= s2["app_interval"]
+                        and s2["app_idx"] == idx and s2["display_on"]
+                        and not (s2["alert_props"] and s2["alert_until"] > time.time())):
+                    state.adv_app()           # dwell elapsed → advance to next app
+                page_due = app_due = None
+                continue
+
             # arm independent cycle timers
             if st["auto_page"]:
                 page_due = page_due or now + st["page_interval"]
@@ -114,7 +142,6 @@ def main():
             else:
                 app_due = None
 
-            app = apps[st["app_idx"]]
             try:
                 app.update()
             except Exception as e:

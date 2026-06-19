@@ -26,3 +26,4 @@ log.log
 kiosk.env
 state.json
 state.json.tmp
+cameras.json

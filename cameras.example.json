@@ -1,0 +1,11 @@
+{
+  "fps": 20,
+  "hwaccel": "",
+  "transpose": 1,
+  "labels": true,
+  "cameras": [
+    {"name": "Doorbell",  "url": "rtsps://10.0.0.18:7441/STREAM_ID?enableSrtp", "width": 360},
+    {"name": "Front PTZ", "url": "rtsps://10.0.0.18:7441/STREAM_ID?enableSrtp", "width": 780},
+    {"name": "Side PTZ",  "url": "rtsps://10.0.0.18:7441/STREAM_ID?enableSrtp", "width": 780}
+  ]
+}
