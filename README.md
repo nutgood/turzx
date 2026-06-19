@@ -68,9 +68,27 @@ The service runs headless (no X/Chromium) and drives the USB display directly vi
 ## Apps & orchestrator
 
 `python -m turzx` cycles through **apps**, each with one or more **pages**. Built-in apps:
+- **Cameras** — live multi-camera wall (only if `cameras.json` is present; see below)
 - **Rack Kiosk** — the Grafana dashboard (3 pages)
 - **Clock** — large clock + date
 - **Pi Stats** — the host's CPU temp / load / memory / uptime
+
+### Cameras app (multi-camera video wall)
+Composites N RTSP(S) cameras side-by-side into 1920×480 and streams them via the display's
+**native H.264 path** (a *streaming app* — it drives the display directly while active; the
+PNG path can't, since photographic frames exceed the 1MB payload limit). Configure via
+`cameras.json` (gitignored; copy `cameras.example.json`):
+```json
+{ "fps": 20, "hwaccel": "", "transpose": 1, "labels": true,
+  "cameras": [ {"name": "Doorbell", "url": "rtsps://…?enableSrtp", "width": 360}, … ] }
+```
+- Tile `width`s should sum to 1920; each tile is cover-scaled + center-cropped.
+- **Use low-resolution substreams** — the tiles are tiny (≤780px). 4K streams overwhelm the
+  Pi's decoder; the camera's lowest RTSP quality (e.g. 640×360) is plenty and ~free on CPU.
+- `transpose`: `1` (90° CW) is upright for the normal mounting; set `3` if it's upside-down.
+- `hwaccel`: `""` (software, steadiest at low res) or `"drm"` (Pi 5 HW HEVC).
+- It interrupts instantly for alerts / navigation; for continuous viewing, pin it (select
+  **Cameras** + turn **Auto-cycle apps** off, else it reconnects each rotation).
 
 Cycling model (page-cycling and app-cycling are **independent**, each with its own toggle + interval):
 - **Auto-cycle pages** rotates pages *within* the current app every *page interval*.

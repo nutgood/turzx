@@ -57,6 +57,16 @@ Standalone demos live in `tools/`. The vendored upstream driver is `lib/` (gitig
 - **Display disconnect/reconnect is automatic:** the driver swallows USB write errors, so the
   loop polls `device.present()` every 2s; on absence (or a `USBError`) it disposes the handle and
   blocks in `_connect()` until the display is replugged, then re-opens. No service restart needed.
+- **Streaming apps:** an app may implement `stream(lcd, should_stop, brightness)` instead of
+  relying on `render()`. The orchestrator hands it the device; it drives the display directly
+  (native H.264 via `turzx/h264.py`) until `should_stop()` (nav / alert / display-off / auto-app
+  dwell / disconnect). Used by `CamerasApp` (`turzx/apps/cameras.py`): one ffmpeg HEVC-decodes N
+  RTSP(S) cams → hstack 1920×480 → H.264 → device. **Why streaming, not PNG:** photographic frames
+  exceed the 1MB PNG payload and fall back to JPEG, which this firmware drops. Cameras need
+  **low-res substreams** — Pi 5 has HW HEVC (`-hwaccel drm`, `/dev/video19`) but no HW H.264, and
+  3×4K overwhelms it; 640×360 substreams are ~free. Config: `cameras.json` (gitignored).
+- State persists the current app **by name** (`app_name`), robust to the app list changing
+  (e.g. Cameras only present when `cameras.json` exists, which shifts indices).
 - **Two independent cycles:** page-cycle (within app) and app-cycle, each its own on/off toggle
   + interval, driven by separate timers in the loop. Per-app `refresh` re-renders the current
   page on its own cadence (Clock 1s, dashboard 2s) — that's why the loop's wait deadline is
@@ -91,6 +101,7 @@ Standalone demos live in `tools/`. The vendored upstream driver is `lib/` (gitig
 - Service is **`turzx-kiosk.service`** (ExecStart `python -m turzx`, WorkingDirectory `/home/kiosk/turzx`). Deploy = rsync (or git pull) + `sudo systemctl restart turzx-kiosk`. Secrets (`.grafana_token`, `kiosk.env`) live only on the Pi (gitignored); `state.json` is per-host (gitignored).
 - The old display driver on the Pi was **grafana-kiosk** (Chromium via `~/.xinitrc`/startx on tty1) — removed (autostart neutralized in `~/.bash_profile`, backups `.bak`).
 - macOS-Linux gotcha: `pkill -f <pattern>` matches your own SSH shell's argv — don't `pkill -f xinit` while a file named `.xinitrc` is in your command line.
+- rsync deploy excludes: webcam captures are `*.jpg`/`*.png` (already excluded) — do NOT add `--exclude 'cam*'`, it also matches `cameras.py` / `cameras.example.json` and silently breaks the deploy.
 
 ## Production app & tools
 
