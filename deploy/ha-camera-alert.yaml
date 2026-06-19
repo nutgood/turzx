@@ -1,0 +1,38 @@
+# Home Assistant "action" to flash the cameras with a banner on the TURZX kiosk.
+#
+# Install: Settings → Automations & Scenes → Scripts → (⋮) Edit in YAML, paste this
+# (or add under `script:` in configuration.yaml). It appears as `script.kiosk_camera_alert`.
+#
+# It switches the kiosk to the Cameras app, overlays a banner (top/middle/bottom) on the
+# live video for `timeout` seconds, then returns to whatever was showing before.
+# Tip: enable the "Cameras keep-warm" switch so the switch is instant (no RTSP reconnect).
+
+kiosk_camera_alert:
+  alias: "Kiosk: Camera alert"
+  description: "Show the cameras with a banner overlay for a timeout, then return."
+  icon: mdi:cctv
+  fields:
+    message:
+      name: Message
+      description: Banner text overlaid on the camera video.
+      required: true
+      example: "Motion at front door"
+      selector: { text: {} }
+    position:
+      name: Position
+      description: Where the banner sits over the video.
+      default: top
+      selector: { select: { options: [top, middle, bottom] } }
+    timeout:
+      name: Timeout
+      description: Seconds to show the cameras before returning.
+      default: 20
+      selector: { number: { min: 1, max: 600, unit_of_measurement: s, mode: box } }
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: turzx/kiosk/cmd/cam_alert
+        payload: >-
+          {{ {'message': message,
+              'position': position | default('top'),
+              'timeout': timeout | default(20)} | tojson }}

@@ -57,6 +57,7 @@ def main():
     apps = default_apps()
     state = State(apps, page_interval, app_interval, brightness,
                   persist_path=os.path.join(ROOT, "state.json"))
+    cam_app = next((a for a in apps if hasattr(a, "ensure_warm")), None)
 
     if os.environ.get("MQTT_HOST"):
         try:
@@ -80,6 +81,10 @@ def main():
                 next_present_check = time.time() + 2.0
                 if not present():
                     raise ConnectionError("display absent")
+
+            # keep the camera pipeline warm in the background if requested (instant switching)
+            if cam_app is not None:
+                cam_app.ensure_warm(st["cam_warm"])
 
             # display on/off via brightness
             if not st["display_on"]:
@@ -112,23 +117,36 @@ def main():
 
                 def _stop():
                     s = state.snapshot()
-                    return (not s["display_on"]
+                    if (not s["display_on"]
                             or (s["alert_props"] and s["alert_until"] > time.time())
                             or s["app_idx"] != idx
                             or state.wake.is_set()
-                            or (s["auto_app"] and time.time() - started >= s["app_interval"])
-                            or not present())
+                            or not present()):
+                        return True
+                    if s["cam_alert_return"] and s["cam_alert_until"]:   # camera-alert: hold until it expires
+                        return time.time() > s["cam_alert_until"]
+                    return s["auto_app"] and time.time() - started >= s["app_interval"]
 
-                app.stream(lcd, _stop, st["brightness"])
+                app.stream(lcd, _stop, st["brightness"], state)
                 applied_on = None              # video mode left the device in a new state
                 state.wake.clear()
                 if not present():
                     raise ConnectionError("display absent")
                 s2 = state.snapshot()
-                if (s2["auto_app"] and time.time() - started >= s2["app_interval"]
-                        and s2["app_idx"] == idx and s2["display_on"]
-                        and not (s2["alert_props"] and s2["alert_until"] > time.time())):
-                    state.adv_app()           # dwell elapsed → advance to next app
+                now3 = time.time()
+                alerting = s2["alert_props"] and s2["alert_until"] > now3
+                if s2["app_idx"] != idx:
+                    if s2["cam_alert_return"]:          # navigated away mid camera-alert
+                        state.cam_alert_return = None
+                        state.clear_cam_alert()
+                elif s2["cam_alert_return"] and s2["cam_alert_until"] and now3 > s2["cam_alert_until"]:
+                    ret = s2["cam_alert_return"]        # camera-alert expired → return
+                    state.cam_alert_return = None
+                    state.clear_cam_alert()
+                    state.set_app(ret)
+                elif (s2["auto_app"] and now3 - started >= s2["app_interval"]
+                        and s2["display_on"] and not alerting):
+                    state.adv_app()                    # dwell elapsed → advance to next app
                 page_due = app_due = None
                 continue
 

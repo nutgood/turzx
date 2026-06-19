@@ -58,6 +58,8 @@ def _entities(app_names):
         btn("alert_send", "Send alert", "mdi:bell-ring"),
         ("binary_sensor", "alert_active", cfg("alert_active", "Alert active", state_topic=STATE,
             value_template=sv("alert_active"), payload_on="ON", payload_off="OFF", device_class="problem")),
+        ("switch", "cam_warm", cfg("cam_warm", "Cameras keep-warm", command_topic=f"{CMD}/cam_warm",
+            state_topic=STATE, value_template=sv("cam_warm"), payload_on="ON", payload_off="OFF", icon="mdi:cctv")),
         # Auto-discovered notify action -> notify.turzx_kiosk_alert (message-only, no YAML).
         # Rich/multi-property alerts: script.kiosk_alert or publish JSON to cmd/alert.
         ("notify", "alert", cfg("alert", "Alert", command_topic=f"{CMD}/alert", icon="mdi:bell-alert")),
@@ -132,6 +134,16 @@ def start_mqtt(state):
                 except (ValueError, TypeError):
                     props = {"message": payload}
                 state.fire_alert(props)
+            elif sub == "cam_warm":
+                state.set_cam_warm(on)
+            elif sub == "cam_alert":      # switch to Cameras + banner overlay for a timeout
+                try:
+                    d = json.loads(payload)
+                    if not isinstance(d, dict):
+                        d = {"message": str(d)}
+                except (ValueError, TypeError):
+                    d = {"message": payload}
+                state.fire_cam_alert(d.get("message", ""), d.get("position", "top"), d.get("timeout", 20))
         except Exception as e:
             print(f"mqtt cmd error ({sub}): {e}", flush=True)
 

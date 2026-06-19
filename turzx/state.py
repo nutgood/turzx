@@ -14,7 +14,7 @@ import time
 class State:
     # options set via MQTT/HA that persist across restarts (not transient alert state)
     PERSIST = ("auto_page", "auto_app", "page_interval", "app_interval", "brightness",
-               "display_on", "app_idx", "page_idx", "alert_msg", "alert_timeout")
+               "display_on", "app_idx", "page_idx", "alert_msg", "alert_timeout", "cam_warm")
 
     def __init__(self, apps, page_interval=7.0, app_interval=30.0, brightness=70, persist_path=None):
         self.apps = apps
@@ -32,6 +32,11 @@ class State:
         self.alert_until = 0.0
         self.alert_msg = ""              # buffer for HA text entity
         self.alert_timeout = 20          # buffer for HA number entity
+        self.cam_warm = False            # keep the camera pipeline running in the background
+        self.cam_alert_msg = ""          # banner overlaid on the camera video
+        self.cam_alert_pos = "top"       # top | middle | bottom
+        self.cam_alert_until = 0.0
+        self.cam_alert_return = None     # app to return to after a camera alert
         self.on_change = None            # set by MQTT to publish state
         self.persist_path = persist_path
         self._load()
@@ -199,6 +204,36 @@ class State:
             self._clear_alert_locked()
         self._notify()
 
+    def set_cam_warm(self, on):
+        with self.lock:
+            self.cam_warm = bool(on)
+        self._notify()
+
+    def fire_cam_alert(self, message, position="top", timeout=20):
+        """Switch to Cameras and overlay a banner for ``timeout`` seconds, then return."""
+        with self.lock:
+            self.cam_alert_msg = str(message)
+            self.cam_alert_pos = position if position in ("top", "middle", "bottom") else "top"
+            try:
+                to = float(timeout)
+            except (TypeError, ValueError):
+                to = 20
+            self.cam_alert_until = time.time() + max(1, to)
+            cam_idx = next((i for i, a in enumerate(self.apps) if a.name == "Cameras"), None)
+            if cam_idx is not None:
+                if self.app_idx != cam_idx:
+                    self.cam_alert_return = self.apps[self.app_idx].name
+                self.app_idx = cam_idx
+                self.page_idx = 0
+                self._clear_alert_locked()    # a full-screen alert would hide the cameras
+        self._notify()
+
+    def clear_cam_alert(self):
+        with self.lock:
+            self.cam_alert_until = 0.0
+            self.cam_alert_msg = ""
+        self._notify()
+
     # ---- snapshots ----
     def snapshot(self):
         with self.lock:
@@ -206,7 +241,9 @@ class State:
                         auto_page=self.auto_page, auto_app=self.auto_app,
                         page_interval=self.page_interval, app_interval=self.app_interval,
                         display_on=self.display_on, brightness=self.brightness,
-                        alert_props=self.alert_props, alert_until=self.alert_until)
+                        alert_props=self.alert_props, alert_until=self.alert_until,
+                        cam_warm=self.cam_warm, cam_alert_until=self.cam_alert_until,
+                        cam_alert_return=self.cam_alert_return)
 
     def status(self):
         with self.lock:
@@ -223,4 +260,5 @@ class State:
                 "alert_active": "ON" if (self.alert_until > time.time()) else "OFF",
                 "alert_msg": self.alert_msg,
                 "alert_timeout": int(self.alert_timeout),
+                "cam_warm": "ON" if self.cam_warm else "OFF",
             }
