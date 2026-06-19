@@ -65,6 +65,12 @@ Standalone demos live in `tools/`. The vendored upstream driver is `lib/` (gitig
   exceed the 1MB PNG payload and fall back to JPEG, which this firmware drops. Cameras need
   **low-res substreams** — Pi 5 has HW HEVC (`-hwaccel drm`, `/dev/video19`) but no HW H.264, and
   3×4K overwhelms it; 640×360 substreams are ~free. Config: `cameras.json` (gitignored).
+  - **Keep-warm** (`cam_warm`, HA switch): a background ffmpeg + reader thread stays running so
+    switching is instant; the reader forwards to the device only while Cameras is active (else
+    discards). Short GOP (`-g fps/4`) so the decoder re-syncs fast on a warm switch.
+  - **Camera-alert** (`cmd/cam_alert` / `script.kiosk_camera_alert`): banner over the live video
+    at top/middle/bottom via three `drawtext` layers reading reloadable text files (`reload=1`);
+    `fire_cam_alert` switches to Cameras + remembers the return app; orchestrator reverts on expiry.
 - State persists the current app **by name** (`app_name`), robust to the app list changing
   (e.g. Cameras only present when `cameras.json` exists, which shifts indices).
 - **Two independent cycles:** page-cycle (within app) and app-cycle, each its own on/off toggle

@@ -89,6 +89,17 @@ PNG path can't, since photographic frames exceed the 1MB payload limit). Configu
 - `hwaccel`: `""` (software, steadiest at low res) or `"drm"` (Pi 5 HW HEVC).
 - It interrupts instantly for alerts / navigation; for continuous viewing, pin it (select
   **Cameras** + turn **Auto-cycle apps** off, else it reconnects each rotation).
+- **Cameras keep-warm** (HA switch): keeps the ffmpeg pipeline running in the background so
+  switching to Cameras is instant (no RTSP reconnect / keyframe wait) — costs ~½ core while on.
+- **Camera-alert** (`script.kiosk_camera_alert` / `cmd/cam_alert`): instantly switches to
+  Cameras and overlays a banner on the live video at `top`/`middle`/`bottom` for a timeout,
+  then returns to the previous app. Pairs well with keep-warm for an instant cut.
+  ```yaml
+  service: mqtt.publish
+  data:
+    topic: turzx/kiosk/cmd/cam_alert
+    payload: '{"message": "Motion at front door", "position": "top", "timeout": 20}'
+  ```
 
 Cycling model (page-cycling and app-cycling are **independent**, each with its own toggle + interval):
 - **Auto-cycle pages** rotates pages *within* the current app every *page interval*.
@@ -147,6 +158,7 @@ retained MQTT discovery configs, so HA auto-creates a **TURZX Kiosk** device wit
 - `number` **Page interval**, `number` **App interval**, `number` **Brightness**
 - Alert: `text` **Alert message**, `number` **Alert timeout**, `button` **Send alert**,
   `binary_sensor` **Alert active**, and a `notify` action **`notify.turzx_kiosk_alert`**
+- Cameras: `switch` **Cameras keep-warm** (+ the `script.kiosk_camera_alert` action)
 
 Renaming/removing entities? Add the old `(component, object_id)` to `LEGACY` in
 `turzx/mqtt.py` — retained discovery configs are cleared on connect so HA drops stale duplicates.
